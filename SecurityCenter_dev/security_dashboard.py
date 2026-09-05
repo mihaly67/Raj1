@@ -1,62 +1,36 @@
 import sys
-import subprocess
-import tempfile
-import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget,
                              QListWidget, QFrame)
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QProcess
 from PyQt5.QtGui import QFont
-
-class ServiceController:
-    @staticmethod
-    def run_cmd(cmd):
-        try:
-            subprocess.Popen(f"pkexec sh -c '{cmd}'", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            pass
-
-    @staticmethod
-    def run_cmd_watchdog_start():
-        try:
-            res = subprocess.run(['sudo', '/usr/bin/crontab', '-l'], capture_output=True, text=True)
-            current_cron = [line for line in res.stdout.split('\n') if line and 'miner_watchdog' not in line]
-            current_cron.append('* * * * * /usr/local/bin/miner_watchdog.sh')
-            new_cron = '\n'.join(current_cron) + '\n'
-
-            process = subprocess.Popen(['sudo', '/usr/bin/crontab', '-'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            process.communicate(input=new_cron.encode())
-        except:
-            pass
-
-    @staticmethod
-    def run_cmd_watchdog_stop():
-        try:
-            res = subprocess.run(['sudo', '/usr/bin/crontab', '-l'], capture_output=True, text=True)
-            current_cron = [line for line in res.stdout.split('\n') if line and 'miner_watchdog' not in line]
-            new_cron = '\n'.join(current_cron) + '\n'
-
-            process = subprocess.Popen(['sudo', '/usr/bin/crontab', '-'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            process.communicate(input=new_cron.encode())
-        except:
-            pass
-
-    @staticmethod
-    def get_status(check_cmd):
-        try:
-            res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-            return res.returncode == 0
-        except:
-            return False
 
 class Dashboard(QMainWindow):
     def __init__(self):
         super().__init__()
         self.initUI()
 
-        self.timer = QTimer()
+        # A QProcess objektumok példányosítása, hogy a memóriában maradjanak amíg a program fut
+        self.clam_start_proc = QProcess(self)
+        self.clam_stop_proc = QProcess(self)
+        self.clam_status_proc = QProcess(self)
+
+        self.f2b_start_proc = QProcess(self)
+        self.f2b_stop_proc = QProcess(self)
+        self.f2b_status_proc = QProcess(self)
+
+        self.wd_start_proc = QProcess(self)
+        self.wd_stop_proc = QProcess(self)
+        self.wd_status_proc = QProcess(self)
+
+        # Connect standard output for debugging if needed
+        self.clam_status_proc.finished.connect(self.clam_status_finished)
+        self.f2b_status_proc.finished.connect(self.f2b_status_finished)
+        self.wd_status_proc.finished.connect(self.wd_status_finished)
+
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_statuses)
-        self.timer.start(2000)
+        self.timer.start(3000)
 
     def initUI(self):
         self.setWindowTitle("CyberSec Control Center")
@@ -120,24 +94,25 @@ class Dashboard(QMainWindow):
         # Main Content Area
         self.stack = QStackedWidget()
 
-        # Pages
+        # Pages - Using QProcess to start/stop without blocking the GUI
         self.clam_page, self.clam_status = self.create_page(
             "ClamAV Antivirus Daemon",
             "Protects the system against malicious files and trojans.",
-            lambda: ServiceController.run_cmd("/usr/sbin/service clamav-daemon start"),
-            lambda: ServiceController.run_cmd("/usr/sbin/service clamav-daemon stop")
+            lambda: self.clam_start_proc.start("sudo", ["/usr/sbin/service", "clamav-daemon", "start"]),
+            lambda: self.clam_stop_proc.start("sudo", ["/usr/sbin/service", "clamav-daemon", "stop"])
         )
         self.f2b_page, self.f2b_status = self.create_page(
             "Fail2ban Intrusion Prevention",
             "Bans IPs that show malicious signs like too many password failures.",
-            lambda: ServiceController.run_cmd("/usr/sbin/service fail2ban start"),
-            lambda: ServiceController.run_cmd("/usr/sbin/service fail2ban stop")
+            lambda: self.f2b_start_proc.start("sudo", ["/usr/sbin/service", "fail2ban", "start"]),
+            lambda: self.f2b_stop_proc.start("sudo", ["/usr/sbin/service", "fail2ban", "stop"])
         )
         self.wd_page, self.wd_status = self.create_page(
             "Merkava Cryptominer Watchdog",
             "Continuously scans process list and kills known crypto miners.",
-            ServiceController.run_cmd_watchdog_start,
-            ServiceController.run_cmd_watchdog_stop
+            # The user said watchdog worked perfectly with the shell approach. We maintain its logic via bash -c
+            lambda: self.wd_start_proc.start("bash", ["-c", "(sudo crontab -l 2>/dev/null | grep -v miner_watchdog; echo '* * * * * /usr/local/bin/miner_watchdog.sh') | sudo crontab -"]),
+            lambda: self.wd_stop_proc.start("bash", ["-c", "sudo crontab -l 2>/dev/null | grep -v miner_watchdog | sudo crontab -"])
         )
 
         self.stack.addWidget(self.clam_page)
@@ -160,17 +135,14 @@ class Dashboard(QMainWindow):
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(20)
 
-        # Title
         title = QLabel(title_text)
         title.setFont(QFont("Segoe UI", 24, QFont.Bold))
 
-        # Description
         desc = QLabel(desc_text)
         desc.setFont(QFont("Segoe UI", 12))
         desc.setStyleSheet("color: #94a3b8;")
         desc.setWordWrap(True)
 
-        # Status Card
         status_card = QFrame()
         status_card.setObjectName("statusCard")
         status_layout = QVBoxLayout()
@@ -187,11 +159,11 @@ class Dashboard(QMainWindow):
         status_layout.addWidget(status_lbl)
         status_card.setLayout(status_layout)
 
-        # Controls
         controls_layout = QHBoxLayout()
         btn_start = QPushButton("START SERVICE")
         btn_start.setCursor(Qt.PointingHandCursor)
         btn_start.clicked.connect(start_cb)
+        # Kis kesleltetes a statusz frissitese elott, hogy a processz biztosan elinduljon
         btn_start.clicked.connect(lambda: QTimer.singleShot(1000, self.update_statuses))
 
         btn_stop = QPushButton("STOP SERVICE")
@@ -217,25 +189,40 @@ class Dashboard(QMainWindow):
         self.stack.setCurrentIndex(index)
 
     def update_statuses(self):
-        # ClamAV - Rootless check
-        if ServiceController.get_status("pgrep -f clamd"):
+        # Fire off asynchronous status checks
+        # ClamAV
+        if self.clam_status_proc.state() == QProcess.NotRunning:
+            self.clam_status_proc.start("pgrep", ["-f", "clamd"])
+
+        # Fail2ban
+        if self.f2b_status_proc.state() == QProcess.NotRunning:
+            self.f2b_status_proc.start("pgrep", ["-f", "fail2ban-server"])
+
+        # Watchdog
+        if self.wd_status_proc.state() == QProcess.NotRunning:
+            self.wd_status_proc.start("bash", ["-c", "sudo crontab -l 2>/dev/null | grep miner_watchdog.sh"])
+
+    # --- Slot callbacks for when status processes finish ---
+
+    def clam_status_finished(self, exitCode, exitStatus):
+        if exitStatus == QProcess.NormalExit and exitCode == 0:
             self.clam_status.setText("● SYSTEM ACTIVE")
             self.clam_status.setStyleSheet("color: #22c55e;")
         else:
             self.clam_status.setText("○ SYSTEM OFFLINE")
             self.clam_status.setStyleSheet("color: #64748b;")
 
-        # Fail2ban - Rootless check
-        if ServiceController.get_status("pgrep -f fail2ban-server"):
+    def f2b_status_finished(self, exitCode, exitStatus):
+        if exitStatus == QProcess.NormalExit and exitCode == 0:
             self.f2b_status.setText("● SYSTEM ACTIVE")
             self.f2b_status.setStyleSheet("color: #22c55e;")
         else:
             self.f2b_status.setText("○ SYSTEM OFFLINE")
             self.f2b_status.setStyleSheet("color: #64748b;")
 
-        # Watchdog - Pythonic check using absolute path for sudo crontab allowed in sudoers
-        res = subprocess.run(['sudo', '/usr/bin/crontab', '-l'], capture_output=True, text=True)
-        if "miner_watchdog.sh" in res.stdout:
+    def wd_status_finished(self, exitCode, exitStatus):
+        if exitStatus == QProcess.NormalExit and exitCode == 0:
+            # grep found the cron job
             self.wd_status.setText("● SYSTEM ACTIVE")
             self.wd_status.setStyleSheet("color: #22c55e;")
         else:
