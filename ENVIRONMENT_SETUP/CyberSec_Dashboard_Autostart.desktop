@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=CyberSec Dashboard
+Comment=Unified Security Manager
+Exec=bash -c "$HOME/Jules_ICA_Builder/ENVIRONMENT_SETUP/start_cybersec.sh --hidden"
+Icon=security-high
+Terminal=false
+Type=Application
+Categories=System;
