@@ -1,16 +1,17 @@
 import sys
+import subprocess
+import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget,
-                             QListWidget, QFrame)
+                             QListWidget, QFrame, QInputDialog, QLineEdit)
 from PyQt5.QtCore import QTimer, Qt, QProcess
 from PyQt5.QtGui import QFont
 
 class Dashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.initUI()
 
-        # A QProcess objektumok példányosítása, hogy a memóriában maradjanak amíg a program fut
+        # A QProcess objektumok inicializálása az UI felépítése ELŐTT kell történjen!
         self.clam_start_proc = QProcess(self)
         self.clam_stop_proc = QProcess(self)
         self.clam_status_proc = QProcess(self)
@@ -23,10 +24,12 @@ class Dashboard(QMainWindow):
         self.wd_stop_proc = QProcess(self)
         self.wd_status_proc = QProcess(self)
 
-        # Connect standard output for debugging if needed
         self.clam_status_proc.finished.connect(self.clam_status_finished)
         self.f2b_status_proc.finished.connect(self.f2b_status_finished)
         self.wd_status_proc.finished.connect(self.wd_status_finished)
+
+        self.sudo_password = None
+        self.initUI()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_statuses)
@@ -98,21 +101,20 @@ class Dashboard(QMainWindow):
         self.clam_page, self.clam_status = self.create_page(
             "ClamAV Antivirus Daemon",
             "Protects the system against malicious files and trojans.",
-            lambda: self.clam_start_proc.start("sudo", ["/usr/sbin/service", "clamav-daemon", "start"]),
-            lambda: self.clam_stop_proc.start("sudo", ["/usr/sbin/service", "clamav-daemon", "stop"])
+            lambda: self.execute_sudo_cmd(self.clam_start_proc, ["/usr/sbin/service", "clamav-daemon", "start"]),
+            lambda: self.execute_sudo_cmd(self.clam_stop_proc, ["/usr/sbin/service", "clamav-daemon", "stop"])
         )
         self.f2b_page, self.f2b_status = self.create_page(
             "Fail2ban Intrusion Prevention",
             "Bans IPs that show malicious signs like too many password failures.",
-            lambda: self.f2b_start_proc.start("sudo", ["/usr/sbin/service", "fail2ban", "start"]),
-            lambda: self.f2b_stop_proc.start("sudo", ["/usr/sbin/service", "fail2ban", "stop"])
+            lambda: self.execute_sudo_cmd(self.f2b_start_proc, ["/usr/sbin/service", "fail2ban", "start"]),
+            lambda: self.execute_sudo_cmd(self.f2b_stop_proc, ["/usr/sbin/service", "fail2ban", "stop"])
         )
         self.wd_page, self.wd_status = self.create_page(
             "Merkava Cryptominer Watchdog",
             "Continuously scans process list and kills known crypto miners.",
-            # The user said watchdog worked perfectly with the shell approach. We maintain its logic via bash -c
-            lambda: self.wd_start_proc.start("bash", ["-c", "(sudo crontab -l 2>/dev/null | grep -v miner_watchdog; echo '* * * * * /usr/local/bin/miner_watchdog.sh') | sudo crontab -"]),
-            lambda: self.wd_stop_proc.start("bash", ["-c", "sudo crontab -l 2>/dev/null | grep -v miner_watchdog | sudo crontab -"])
+            lambda: self.execute_sudo_cmd(self.wd_start_proc, ["bash", "-c", "(sudo crontab -l 2>/dev/null | grep -v miner_watchdog; echo '* * * * * /usr/local/bin/miner_watchdog.sh') | sudo crontab -"]),
+            lambda: self.execute_sudo_cmd(self.wd_stop_proc, ["bash", "-c", "sudo crontab -l 2>/dev/null | grep -v miner_watchdog | sudo crontab -"])
         )
 
         self.stack.addWidget(self.clam_page)
@@ -127,6 +129,20 @@ class Dashboard(QMainWindow):
 
         self.sidebar.setCurrentRow(0)
         self.update_statuses()
+
+
+    def execute_sudo_cmd(self, proc_obj, args_list):
+        if not self.sudo_password:
+            pwd, ok = QInputDialog.getText(self, "Sudo Authentication", "Enter your password for root privileges:", QLineEdit.Password)
+            if ok and pwd:
+                self.sudo_password = pwd
+            else:
+                return
+
+        # Start sudo with -S to read from stdin
+        proc_obj.start("sudo", ["-S"] + args_list)
+        # Write the password to the process's stdin
+        proc_obj.write((self.sudo_password + "\n").encode())
 
     def create_page(self, title_text, desc_text, start_cb, stop_cb):
         page = QFrame()
@@ -163,7 +179,6 @@ class Dashboard(QMainWindow):
         btn_start = QPushButton("START SERVICE")
         btn_start.setCursor(Qt.PointingHandCursor)
         btn_start.clicked.connect(start_cb)
-        # Kis kesleltetes a statusz frissitese elott, hogy a processz biztosan elinduljon
         btn_start.clicked.connect(lambda: QTimer.singleShot(1000, self.update_statuses))
 
         btn_stop = QPushButton("STOP SERVICE")
@@ -192,11 +207,11 @@ class Dashboard(QMainWindow):
         # Fire off asynchronous status checks
         # ClamAV
         if self.clam_status_proc.state() == QProcess.NotRunning:
-            self.clam_status_proc.start("pgrep", ["-f", "clamd"])
+            self.clam_status_proc.start("pgrep", ["-x", "clamd"])
 
         # Fail2ban
         if self.f2b_status_proc.state() == QProcess.NotRunning:
-            self.f2b_status_proc.start("pgrep", ["-f", "fail2ban-server"])
+            self.f2b_status_proc.start("pgrep", ["-x", "fail2ban-server"])
 
         # Watchdog
         if self.wd_status_proc.state() == QProcess.NotRunning:
