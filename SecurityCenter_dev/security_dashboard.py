@@ -32,24 +32,32 @@ class Dashboard(QMainWindow):
         self.initUI()
         self.statusBar().showMessage('Ready. Awaiting commands.')
 
+
         # Tray Icon beállítása (KDE Plasma stílushoz illeszkedő, ahogy a korábbi kódokban volt)
         self.tray_icon = QSystemTrayIcon(self)
 
-        icon_path = "/usr/share/icons/oxygen/base/128x128/apps/security-high.png"
-        if not os.path.exists(icon_path):
-            icon_path = "/usr/share/icons/gnome/256x256/apps/security-high.png"
+        # A biztonsági pajzs ikon betöltése (security-high) a Qt natív témakészletéből,
+        # vagy egy explicit KDE/MX Linux elérési útról.
+        icon = QIcon.fromTheme("security-high")
+        if icon.isNull():
+            icon_path = "/usr/share/icons/oxygen/base/128x128/apps/security-high.png"
+            if not os.path.exists(icon_path):
+                icon_path = "/usr/share/icons/gnome/256x256/apps/security-high.png"
 
-        if os.path.exists(icon_path):
-            self.tray_icon.setIcon(QIcon(icon_path))
-        else:
-            # Fallback icon
-            pixmap = QPixmap(64, 64)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            painter.setBrush(QColor("#3b82f6"))
-            painter.drawEllipse(0, 0, 64, 64)
-            painter.end()
-            self.tray_icon.setIcon(QIcon(pixmap))
+            if os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+            else:
+                # Fallback icon
+                pixmap = QPixmap(64, 64)
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                painter.setBrush(QColor("#3b82f6"))
+                painter.drawEllipse(0, 0, 64, 64)
+                painter.end()
+                icon = QIcon(pixmap)
+
+        self.tray_icon.setIcon(icon)
+
 
         show_action = QAction("Megjelenítés", self)
         quit_action = QAction("Bezárás", self)
@@ -173,7 +181,7 @@ class Dashboard(QMainWindow):
             pwd, ok = QInputDialog.getText(self, "Sudo Authentication", "Enter your password for root privileges:", QLineEdit.Password)
             if ok and pwd:
                 self.sudo_password = pwd
-            self.statusBar().showMessage('Password saved in memory.', 5000)
+                self.statusBar().showMessage('Password saved in memory.', 5000)
             else:
                 return
 
