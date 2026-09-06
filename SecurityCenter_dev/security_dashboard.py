@@ -1,7 +1,7 @@
 import sys
 import subprocess
 import os
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QListWidget, QFrame, QSystemTrayIcon, QMenu, QAction, QInputDialog, QLineEdit
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QListWidget, QFrame, QSystemTrayIcon, QMenu, QAction, QInputDialog, QLineEdit, QTextEdit, QFileDialog
 from PyQt5.QtCore import QTimer, Qt, QProcess
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
@@ -15,6 +15,11 @@ class Dashboard(QMainWindow):
         self.clam_stop_proc = QProcess(self)
         self.clam_status_proc = QProcess(self)
 
+        self.clam_scan_proc = QProcess(self)
+        self.clam_update_proc = QProcess(self)
+        self.clam_cron_proc = QProcess(self)
+
+
         self.f2b_start_proc = QProcess(self)
         self.f2b_stop_proc = QProcess(self)
         self.f2b_status_proc = QProcess(self)
@@ -26,6 +31,14 @@ class Dashboard(QMainWindow):
         self.clam_status_proc.finished.connect(self.clam_status_finished)
         self.f2b_status_proc.finished.connect(self.f2b_status_finished)
         self.wd_status_proc.finished.connect(self.wd_status_finished)
+
+        self.clam_scan_proc.readyReadStandardOutput.connect(self.clam_scan_output)
+        self.clam_scan_proc.readyReadStandardError.connect(self.clam_scan_error)
+        self.clam_scan_proc.finished.connect(self.clam_scan_finished)
+
+        self.clam_update_proc.readyReadStandardOutput.connect(self.clam_update_output)
+        self.clam_update_proc.finished.connect(self.clam_update_finished)
+
 
         self.sudo_password = None
 
@@ -143,12 +156,89 @@ class Dashboard(QMainWindow):
         self.stack = QStackedWidget()
 
         # Pages - Using QProcess to start/stop without blocking the GUI
-        self.clam_page, self.clam_status = self.create_page(
-            "ClamAV Antivirus Daemon",
-            "Protects the system against malicious files and trojans.",
-            lambda: self.execute_sudo_cmd(self.clam_start_proc, ["/usr/sbin/service", "clamav-daemon", "start"]),
-            lambda: self.execute_sudo_cmd(self.clam_stop_proc, ["/usr/sbin/service", "clamav-daemon", "stop"])
-        )
+        self.clam_page = QFrame()
+        self.clam_page.setObjectName("mainPanel")
+        clam_layout = QVBoxLayout()
+        clam_layout.setContentsMargins(40, 40, 40, 40)
+        clam_layout.setSpacing(20)
+
+        clam_title = QLabel("ClamAV Antivirus & Scanner")
+        clam_title.setFont(QFont("Segoe UI", 24, QFont.Bold))
+        clam_desc = QLabel("Protects the system against malicious files and trojans.")
+        clam_desc.setFont(QFont("Segoe UI", 12))
+        clam_desc.setStyleSheet("color: #94a3b8;")
+
+        # Status Card (Daemon)
+        status_card = QFrame()
+        status_card.setObjectName("statusCard")
+        status_layout = QVBoxLayout()
+        status_layout.setContentsMargins(20, 20, 20, 20)
+        status_header = QLabel("DAEMON STATUS")
+        status_header.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        status_header.setStyleSheet("color: #64748b;")
+        self.clam_status = QLabel("Checking...")
+        self.clam_status.setFont(QFont("Monospace", 18, QFont.Bold))
+        status_layout.addWidget(status_header)
+        status_layout.addWidget(self.clam_status)
+
+        # Daemon Controls
+        daemon_controls = QHBoxLayout()
+        btn_start = QPushButton("START DAEMON")
+        btn_stop = QPushButton("STOP DAEMON")
+        btn_stop.setObjectName("stopBtn")
+        btn_start.clicked.connect(lambda: self.execute_sudo_cmd(self.clam_start_proc, ["/usr/sbin/service", "clamav-daemon", "start"]))
+        btn_stop.clicked.connect(lambda: self.execute_sudo_cmd(self.clam_stop_proc, ["/usr/sbin/service", "clamav-daemon", "stop"]))
+        daemon_controls.addWidget(btn_start)
+        daemon_controls.addWidget(btn_stop)
+        status_layout.addLayout(daemon_controls)
+        status_card.setLayout(status_layout)
+
+        # Scanner Controls
+        scan_card = QFrame()
+        scan_card.setObjectName("statusCard")
+        scan_layout = QVBoxLayout()
+        scan_layout.setContentsMargins(20, 20, 20, 20)
+        scan_header = QLabel("SCANNER & UPDATER")
+        scan_header.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        scan_header.setStyleSheet("color: #64748b;")
+
+        # Buttons row 1: Scanning
+        scan_btns1 = QHBoxLayout()
+        btn_scan_root = QPushButton("Root (/) Scan")
+        btn_scan_home = QPushButton("Home (/home) Scan")
+        btn_scan_custom = QPushButton("Custom Folder...")
+        btn_scan_root.clicked.connect(lambda: self.start_clam_scan("/"))
+        btn_scan_home.clicked.connect(lambda: self.start_clam_scan("/home"))
+        btn_scan_custom.clicked.connect(self.start_custom_scan)
+        scan_btns1.addWidget(btn_scan_root)
+        scan_btns1.addWidget(btn_scan_home)
+        scan_btns1.addWidget(btn_scan_custom)
+
+        # Buttons row 2: Updating
+        scan_btns2 = QHBoxLayout()
+        btn_update_manual = QPushButton("Manual Update")
+        self.btn_update_auto = QPushButton("Auto Update (Cron): OFF")
+        btn_update_manual.clicked.connect(self.start_manual_update)
+        self.btn_update_auto.clicked.connect(self.toggle_auto_update)
+        scan_btns2.addWidget(btn_update_manual)
+        scan_btns2.addWidget(self.btn_update_auto)
+
+        scan_layout.addWidget(scan_header)
+        scan_layout.addLayout(scan_btns1)
+        scan_layout.addLayout(scan_btns2)
+
+        # Output Log Console
+        self.clam_log = QTextEdit()
+        self.clam_log.setReadOnly(True)
+        self.clam_log.setStyleSheet("background-color: #000; color: #0f0; font-family: monospace; font-size: 11px;")
+        scan_layout.addWidget(self.clam_log)
+        scan_card.setLayout(scan_layout)
+
+        clam_layout.addWidget(clam_title)
+        clam_layout.addWidget(clam_desc)
+        clam_layout.addWidget(status_card)
+        clam_layout.addWidget(scan_card)
+        self.clam_page.setLayout(clam_layout)
         self.f2b_page, self.f2b_status = self.create_page(
             "Fail2ban Intrusion Prevention",
             "Bans IPs that show malicious signs like too many password failures.",
@@ -266,6 +356,67 @@ class Dashboard(QMainWindow):
     def clear_password(self):
         self.sudo_password = None
         self.statusBar().showMessage('Sudo Password cleared.', 5000)
+
+
+    # --- ClamAV Scanner & Updater Logic ---
+    def start_clam_scan(self, target_dir):
+        if self.clam_scan_proc.state() == QProcess.Running:
+            self.clam_log.append("⚠️ A scan is already running! Please wait or terminate it.")
+            return
+
+        self.clam_log.clear()
+        self.clam_log.append(f"[*] Starting ClamAV Scan on: {target_dir}")
+        self.execute_sudo_cmd(self.clam_scan_proc, ["clamscan", "-r", "-i", target_dir])
+
+    def start_custom_scan(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Directory to Scan")
+        if folder:
+            self.start_clam_scan(folder)
+
+    def clam_scan_output(self):
+        text = self.clam_scan_proc.readAllStandardOutput().data().decode(errors='ignore')
+        self.clam_log.append(text.strip())
+        self.clam_log.verticalScrollBar().setValue(self.clam_log.verticalScrollBar().maximum())
+
+    def clam_scan_error(self):
+        text = self.clam_scan_proc.readAllStandardError().data().decode(errors='ignore')
+        self.clam_log.append(f"<span style='color:red'>{text.strip()}</span>")
+
+    def clam_scan_finished(self, exitCode, exitStatus):
+        self.clam_log.append(f"[-] Scan finished with exit code {exitCode}.")
+        self.clam_log.verticalScrollBar().setValue(self.clam_log.verticalScrollBar().maximum())
+
+    def start_manual_update(self):
+        if self.clam_update_proc.state() == QProcess.Running:
+            self.clam_log.append("⚠️ An update is already running!")
+            return
+
+        self.clam_log.clear()
+        self.clam_log.append("[*] Starting manual signature update (freshclam)...")
+        self.execute_sudo_cmd(self.clam_update_proc, ["freshclam"])
+
+    def clam_update_output(self):
+        text = self.clam_update_proc.readAllStandardOutput().data().decode(errors='ignore')
+        self.clam_log.append(text.strip())
+        self.clam_log.verticalScrollBar().setValue(self.clam_log.verticalScrollBar().maximum())
+
+    def clam_update_finished(self, exitCode, exitStatus):
+        self.clam_log.append(f"[-] Update finished with exit code {exitCode}.")
+
+    def toggle_auto_update(self):
+        # We use standard bash pipe for crontab via sudo since it's NOPASSWD
+        if "ON" in self.btn_update_auto.text():
+            cmd = "sudo crontab -l 2>/dev/null | grep -v update_clamav.sh | sudo crontab -"
+            self.clam_log.append("[*] Disabling automatic updates...")
+        else:
+            cmd = "(sudo crontab -l 2>/dev/null | grep -v update_clamav.sh; echo '0 */4 * * * /usr/local/bin/update_clamav.sh') | sudo crontab -"
+            self.clam_log.append("[*] Enabling automatic updates (every 4 hours)...")
+
+        self.clam_cron_proc.start("bash", ["-c", cmd])
+        # Force a status update check slightly after
+        QTimer.singleShot(1500, self.update_statuses)
+
+    # --- End ClamAV Logic ---
 
     def switch_page(self, index):
 
