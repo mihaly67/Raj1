@@ -1,11 +1,10 @@
 import sys
 import subprocess
 import os
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QLabel, QStackedWidget,
-                             QListWidget, QFrame, QInputDialog, QLineEdit)
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QListWidget, QFrame, QSystemTrayIcon, QMenu, QAction, QInputDialog, QLineEdit
 from PyQt5.QtCore import QTimer, Qt, QProcess
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
+from PyQt5.QtNetwork import QLocalSocket, QLocalServer
 
 class Dashboard(QMainWindow):
     def __init__(self):
@@ -29,7 +28,45 @@ class Dashboard(QMainWindow):
         self.wd_status_proc.finished.connect(self.wd_status_finished)
 
         self.sudo_password = None
+
         self.initUI()
+        self.statusBar().showMessage('Ready. Awaiting commands.')
+
+        # Tray Icon beállítása (KDE Plasma stílushoz illeszkedő, ahogy a korábbi kódokban volt)
+        self.tray_icon = QSystemTrayIcon(self)
+
+        icon_path = "/usr/share/icons/oxygen/base/128x128/apps/security-high.png"
+        if not os.path.exists(icon_path):
+            icon_path = "/usr/share/icons/gnome/256x256/apps/security-high.png"
+
+        if os.path.exists(icon_path):
+            self.tray_icon.setIcon(QIcon(icon_path))
+        else:
+            # Fallback icon
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setBrush(QColor("#3b82f6"))
+            painter.drawEllipse(0, 0, 64, 64)
+            painter.end()
+            self.tray_icon.setIcon(QIcon(pixmap))
+
+        show_action = QAction("Megjelenítés", self)
+        quit_action = QAction("Bezárás", self)
+        clear_pwd_action = QAction("Sudo Jelszó Törlése", self)
+        clear_pwd_action.triggered.connect(self.clear_password)
+        show_action.triggered.connect(self.show_normal)
+        quit_action.triggered.connect(QApplication.instance().quit)
+
+        tray_menu = QMenu()
+        tray_menu.addAction(show_action)
+        tray_menu.addAction(clear_pwd_action)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.tray_icon_clicked)
+        self.tray_icon.show()
+
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_statuses)
@@ -136,6 +173,7 @@ class Dashboard(QMainWindow):
             pwd, ok = QInputDialog.getText(self, "Sudo Authentication", "Enter your password for root privileges:", QLineEdit.Password)
             if ok and pwd:
                 self.sudo_password = pwd
+            self.statusBar().showMessage('Password saved in memory.', 5000)
             else:
                 return
 
@@ -169,7 +207,7 @@ class Dashboard(QMainWindow):
         status_header.setStyleSheet("color: #64748b;")
 
         status_lbl = QLabel("Checking...")
-        status_lbl.setFont(QFont("Consolas", 18, QFont.Bold))
+        status_lbl.setFont(QFont("Monospace", 18, QFont.Bold))
 
         status_layout.addWidget(status_header)
         status_layout.addWidget(status_lbl)
@@ -200,7 +238,29 @@ class Dashboard(QMainWindow):
         page.setLayout(layout)
         return page, status_lbl
 
+
+    def show_normal(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def tray_icon_clicked(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.show_normal()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
+        self.tray_icon.showMessage("CyberSec Dashboard", "Az alkalmazás a tálcán fut tovább.", QSystemTrayIcon.Information, 2000)
+
+    def clear_password(self):
+        self.sudo_password = None
+        self.statusBar().showMessage('Sudo Password cleared.', 5000)
+
     def switch_page(self, index):
+
         self.stack.setCurrentIndex(index)
 
     def update_statuses(self):
@@ -246,6 +306,31 @@ class Dashboard(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    socket = QLocalSocket()
+    socket.connectToServer('Jules_CyberSec_Instance')
+    if socket.waitForConnected(500):
+        socket.write(b"SHOW")
+        socket.waitForBytesWritten(500)
+        sys.exit(0)
+
+    server = QLocalServer()
+    server.removeServer('Jules_CyberSec_Instance')
+    server.listen('Jules_CyberSec_Instance')
+
     window = Dashboard()
-    window.show()
+
+    def handle_connection():
+        conn = server.nextPendingConnection()
+        conn.waitForReadyRead(500)
+        if conn.readAll() == b"SHOW":
+            window.show_normal()
+        conn.disconnectFromServer()
+
+    server.newConnection.connect(handle_connection)
+
+    if "--hidden" not in sys.argv:
+        window.show()
+
     sys.exit(app.exec_())
