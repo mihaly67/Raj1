@@ -118,9 +118,9 @@ class ProcessTableModel(QAbstractTableModel):
         return None
 
     def update_data(self, new_data):
-        self.layoutAboutToBeChanged.emit()
+        self.beginResetModel()
         self._data = new_data
-        self.layoutChanged.emit()
+        self.endResetModel()
 
 
 class HardwareMonitor(QMainWindow):
@@ -130,19 +130,19 @@ class HardwareMonitor(QMainWindow):
         self.resize(1000, 800)
         self.setStyleSheet("QMainWindow { background-color: #0f172a; color: white; }")
 
-        # Ablak ikon
-        self.icon_path = "/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png"
+        # Ablak ikon (Pajzs)
+        self.icon_path = "/usr/share/icons/oxygen/base/128x128/status/security-high.png"
         if os.path.exists(self.icon_path):
             self.setWindowIcon(QIcon(self.icon_path))
         else:
-            self.setWindowIcon(QIcon.fromTheme("utilities-system-monitor"))
+            self.setWindowIcon(QIcon.fromTheme("security-high"))
 
         # Tray Icon beállítás
         self.tray_icon = QSystemTrayIcon(self)
         if os.path.exists(self.icon_path):
             self.tray_icon.setIcon(QIcon(self.icon_path))
         else:
-            self.tray_icon.setIcon(QIcon.fromTheme("utilities-system-monitor"))
+            self.tray_icon.setIcon(QIcon.fromTheme("security-high"))
 
         tray_menu = QMenu()
         show_action = QAction("Megjelenítés", self)
