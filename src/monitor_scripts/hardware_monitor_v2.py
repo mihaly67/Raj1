@@ -131,18 +131,18 @@ class HardwareMonitor(QMainWindow):
         self.setStyleSheet("QMainWindow { background-color: #0f172a; color: white; }")
 
         # Ablak ikon (Pajzs)
-        self.icon_path = "/usr/share/icons/oxygen/base/128x128/status/security-high.png"
+        self.icon_path = "/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png"
         if os.path.exists(self.icon_path):
             self.setWindowIcon(QIcon(self.icon_path))
         else:
-            self.setWindowIcon(QIcon.fromTheme("security-high"))
+            self.setWindowIcon(QIcon.fromTheme("utilities-system-monitor"))
 
         # Tray Icon beállítás
         self.tray_icon = QSystemTrayIcon(self)
         if os.path.exists(self.icon_path):
             self.tray_icon.setIcon(QIcon(self.icon_path))
         else:
-            self.tray_icon.setIcon(QIcon.fromTheme("security-high"))
+            self.tray_icon.setIcon(QIcon.fromTheme("utilities-system-monitor"))
 
         tray_menu = QMenu()
         show_action = QAction("Megjelenítés", self)
