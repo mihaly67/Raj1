@@ -3,10 +3,11 @@ import psutil
 import subprocess
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QAbstractItemView)
-from PyQt5.QtCore import QTimer, Qt
+                             QHBoxLayout, QLabel, QTableView, QHeaderView,
+                             QAbstractItemView, QSystemTrayIcon, QMenu, QAction)
+from PyQt5.QtCore import QTimer, Qt, QAbstractTableModel, QSortFilterProxyModel, QModelIndex
 from PyQt5.QtGui import QColor, QFont, QPainter, QIcon
+from PyQt5.QtNetwork import QLocalSocket, QLocalServer
 
 class ResourceBar(QWidget):
     def __init__(self, label_text, parent=None):
@@ -14,7 +15,7 @@ class ResourceBar(QWidget):
         self.label_text = label_text
         self.val1 = 0.0 # Zöld (User)
         self.val2 = 0.0 # Vörös (System/Kernel)
-        self.setFixedHeight(15) # Magasság felezve (30 -> 15)
+        self.setFixedHeight(15)
 
     def update_values(self, val1, val2=0.0):
         self.val1 = val1
@@ -24,26 +25,15 @@ class ResourceBar(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        # Háttér (sötét kék/szürke)
         painter.fillRect(self.rect(), QColor("#1e293b"))
-
         width = self.rect().width()
         height = self.rect().height()
-
         total = self.val1 + self.val2
-        if total > 100:
-            total = 100
-
+        if total > 100: total = 100
         w1 = int((self.val1 / 100.0) * width)
         w2 = int((self.val2 / 100.0) * width)
-
-        # Erdőzöld (val1)
         painter.fillRect(0, 0, w1, height, QColor("#16a34a"))
-        # Téglavörös (val2)
         painter.fillRect(w1, 0, w2, height, QColor("#dc2626"))
-
-        # Szöveg kiírása (kisebb font miatt 15px-be férjen)
         painter.setPen(QColor("white"))
         font = QFont("Segoe UI", 8, QFont.Bold)
         painter.setFont(font)
@@ -55,7 +45,7 @@ class MultiBar(QWidget):
     def __init__(self, label_text, color_map, parent=None):
         super().__init__(parent)
         self.label_text = label_text
-        self.color_map = color_map # list of (color_hex, value_percentage)
+        self.color_map = color_map
         self.setFixedHeight(15)
         self.text_override = ""
 
@@ -67,24 +57,70 @@ class MultiBar(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
         painter.fillRect(self.rect(), QColor("#1e293b"))
-
         width = self.rect().width()
         height = self.rect().height()
-
         current_x = 0
         for color_hex, val_pct in self.color_map:
             w = int((val_pct / 100.0) * width)
             if w > 0:
                 painter.fillRect(current_x, 0, w, height, QColor(color_hex))
                 current_x += w
-
         painter.setPen(QColor("white"))
         font = QFont("Segoe UI", 8, QFont.Bold)
         painter.setFont(font)
         text = self.text_override if self.text_override else self.label_text
         painter.drawText(self.rect(), Qt.AlignVCenter | Qt.AlignLeft, "  " + text)
+
+
+# --- Custom Table Model for Smooth Scrolling and Proper Sorting ---
+class ProcessTableModel(QAbstractTableModel):
+    def __init__(self, data=None):
+        super().__init__()
+        self._data = data or [] # List of dicts: [{'name': '...', 'pid': 123, 'cpu': 1.5, 'ram': 0.5}]
+        self.headers = ["Név / Argumentumok", "PID", "CPU %", "RAM %"]
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._data)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.headers)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = index.row()
+        col = index.column()
+        item = self._data[row]
+
+        # Sorter uses UserRole for numeric sorting
+        if role == Qt.UserRole:
+            if col == 0: return item['name'].lower()
+            if col == 1: return item['pid']
+            if col == 2: return item['cpu']
+            if col == 3: return item['ram']
+
+        if role == Qt.DisplayRole:
+            if col == 0: return item['name']
+            if col == 1: return str(item['pid'])
+            if col == 2: return f"{item['cpu']:.1f}"
+            if col == 3: return f"{item['ram']:.1f}"
+
+        if role == Qt.TextAlignmentRole:
+            if col > 0: return Qt.AlignRight | Qt.AlignVCenter
+            return Qt.AlignLeft | Qt.AlignVCenter
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self.headers[section]
+        return None
+
+    def update_data(self, new_data):
+        self.layoutAboutToBeChanged.emit()
+        self._data = new_data
+        self.layoutChanged.emit()
 
 
 class HardwareMonitor(QMainWindow):
@@ -94,12 +130,30 @@ class HardwareMonitor(QMainWindow):
         self.resize(1000, 800)
         self.setStyleSheet("QMainWindow { background-color: #0f172a; color: white; }")
 
-        # Ablak ikon (Tálcára tételhez klasszikus system monitor ikon pajzs helyett)
-        icon_path = "/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png"
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        # Ablak ikon
+        self.icon_path = "/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png"
+        if os.path.exists(self.icon_path):
+            self.setWindowIcon(QIcon(self.icon_path))
         else:
             self.setWindowIcon(QIcon.fromTheme("utilities-system-monitor"))
+
+        # Tray Icon beállítás
+        self.tray_icon = QSystemTrayIcon(self)
+        if os.path.exists(self.icon_path):
+            self.tray_icon.setIcon(QIcon(self.icon_path))
+        else:
+            self.tray_icon.setIcon(QIcon.fromTheme("utilities-system-monitor"))
+
+        tray_menu = QMenu()
+        show_action = QAction("Megjelenítés", self)
+        quit_action = QAction("Bezárás", self)
+        show_action.triggered.connect(self.showNormal)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        tray_menu.addAction(show_action)
+        tray_menu.addAction(quit_action)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.tray_icon_clicked)
+        self.tray_icon.show()
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -121,7 +175,6 @@ class HardwareMonitor(QMainWindow):
         self.total_cpu_bar = ResourceBar("CPU Összesített")
         self.layout.addWidget(self.total_cpu_bar)
 
-        # CPU Magok elrendezése (2 oszlopos rács)
         cpu_layout = QHBoxLayout()
         col1 = QVBoxLayout()
         col2 = QVBoxLayout()
@@ -138,8 +191,6 @@ class HardwareMonitor(QMainWindow):
 
         # --- Memória és Swap ---
         mem_layout = QVBoxLayout()
-
-        # Jelmagyarázat
         legend_lbl = QLabel("Jelmagyarázat: [Zöld=Használt] [Kék=Puffer] [Sárga=Cache] | CPU: [Zöld=User] [Vörös=Sys]")
         legend_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
         mem_layout.addWidget(legend_lbl)
@@ -160,36 +211,55 @@ class HardwareMonitor(QMainWindow):
         self.layout.addWidget(self.gpu_bar)
         self.layout.addWidget(self.vram_bar)
 
-        # --- Processzek (Win XP Stílusú táblázat) ---
+        # --- Processzek (Smooth TableView) ---
         proc_header = QLabel("Folyamatok (Processzek)")
         proc_header.setStyleSheet("color: #64748b; font-weight: bold; font-size: 14px; margin-top: 10px;")
         self.layout.addWidget(proc_header)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Név / Argumentumok", "PID", "CPU %", "RAM %"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSortingEnabled(True)
-        self.table.setStyleSheet("""
-            QTableWidget { background-color: #1e293b; color: white; gridline-color: #334155; border: none; }
+        self.table_view = QTableView()
+        self.table_model = ProcessTableModel()
+
+        # Proxy for sorting
+        self.proxy_model = QSortFilterProxyModel()
+        self.proxy_model.setSourceModel(self.table_model)
+        self.proxy_model.setSortRole(Qt.UserRole)
+
+        self.table_view.setModel(self.proxy_model)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_view.setSortingEnabled(True)
+
+        self.table_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_view.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_view.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+
+        self.table_view.setStyleSheet("""
+            QTableView { background-color: #1e293b; color: white; gridline-color: #334155; border: none; }
             QHeaderView::section { background-color: #0f172a; color: #94a3b8; font-weight: bold; border: 1px solid #334155; }
         """)
-        self.layout.addWidget(self.table)
+        self.layout.addWidget(self.table_view)
 
-        self.processes = {} # {pid: row_index}
-        self.process_cache = {} # {pid: psutil.Process instance}
+        self.process_cache = {}
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_stats)
-        self.timer.start(2000) # 2 másodperces frissítés
+        self.timer.start(2000)
 
         self.update_stats()
-        # Alapértelmezett rendezés Név alapján (ABC) - mint Win XP
-        self.table.sortItems(0, Qt.AscendingOrder)
+        self.table_view.sortByColumn(0, Qt.AscendingOrder) # Default ABC
+
+    def tray_icon_clicked(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.showNormal()
+                self.activateWindow()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
+        self.tray_icon.showMessage("Hardver Monitor", "Az alkalmazás a tálcán fut tovább.", QSystemTrayIcon.Information, 2000)
 
     def get_uptime(self):
         try:
@@ -209,15 +279,12 @@ class HardwareMonitor(QMainWindow):
             return "N/A"
 
     def update_stats(self):
-        # 0. Felső Statisztika Frissítés
+        # 0. Felső Statisztika
         try:
             tasks_total = len(psutil.pids())
-            # Gyors becslés a running taskokra htop stílusban
             running = len([p for p in psutil.process_iter(['status']) if p.info.get('status') == psutil.STATUS_RUNNING])
-
             uptime = self.get_uptime()
             loadavg = self.get_loadavg()
-
             self.stats_header.setText(f"Uptime: {uptime}  |  Load average: {loadavg}  |  Tasks: {tasks_total}, {running} running")
         except:
             pass
@@ -240,16 +307,16 @@ class HardwareMonitor(QMainWindow):
         mem_cach_pct = (getattr(mem, 'cached', 0) / mem.total) * 100
 
         mem_colors = [
-            ("#16a34a", mem_used_pct), # Zöld
-            ("#2563eb", mem_buff_pct), # Kék
-            ("#eab308", mem_cach_pct), # Sárga
+            ("#16a34a", mem_used_pct),
+            ("#2563eb", mem_buff_pct),
+            ("#eab308", mem_cach_pct),
         ]
         used_gb = mem.used / (1024**3)
         total_gb = mem.total / (1024**3)
         self.mem_bar.update_values(mem_colors, f"Mem [{used_gb:.1f}G / {total_gb:.1f}G]")
 
         swap_used_pct = (swap.used / swap.total) * 100 if swap.total > 0 else 0
-        swap_colors = [("#dc2626", swap_used_pct)] # Piros swap
+        swap_colors = [("#dc2626", swap_used_pct)]
         swap_gb = swap.used / (1024**3)
         swap_tot_gb = swap.total / (1024**3)
         self.swap_bar.update_values(swap_colors, f"Swp [{swap_gb:.1f}G / {swap_tot_gb:.1f}G]")
@@ -261,22 +328,17 @@ class HardwareMonitor(QMainWindow):
             if output:
                 parts = output.split(',')
                 if len(parts) >= 2:
-                    gpu_util = float(parts[0].strip())
-                    mem_util = float(parts[1].strip())
-                    self.gpu_bar.update_values(gpu_util)
-                    self.vram_bar.update_values(mem_util)
-        except Exception as e:
+                    self.gpu_bar.update_values(float(parts[0].strip()))
+                    self.vram_bar.update_values(float(parts[1].strip()))
+        except Exception:
             self.gpu_bar.update_values(0)
             self.vram_bar.update_values(0)
-            self.gpu_bar.label_text = "GPU (Nem elérhető nvidia-smi)"
+            self.gpu_bar.label_text = "GPU (Nem elérhető)"
 
         # 3. Processzek Frissítése
-        is_sorting = self.table.isSortingEnabled()
-        self.table.setSortingEnabled(False) # Ideiglenesen kikapcsoljuk az ugrálás miatt
-
+        new_data = []
         current_pids = set()
 
-        # Csak a memóriát, cmdline-t kérjük iterációkor
         for p in psutil.process_iter(['pid', 'name', 'cmdline', 'memory_percent']):
             try:
                 info = p.info
@@ -285,12 +347,11 @@ class HardwareMonitor(QMainWindow):
 
                 if pid not in self.process_cache:
                     self.process_cache[pid] = p
-                    p.cpu_percent(interval=None) # Inicializálás
+                    p.cpu_percent(interval=None)
                     cpu = 0.0
                 else:
                     cpu = self.process_cache[pid].cpu_percent(interval=None)
 
-                # Hogy a 100% a teljes gépet jelentse, nem csak 1 magot (Win XP Task Manager stílus):
                 cpu = cpu / self.cpu_count
 
                 cmdline = info.get('cmdline')
@@ -301,74 +362,51 @@ class HardwareMonitor(QMainWindow):
 
                 ram = info.get('memory_percent', 0.0) or 0.0
 
-                class NumericItem(QTableWidgetItem):
-                    def __lt__(self, other):
-                        if (isinstance(other, QTableWidgetItem)):
-                            return self.data(Qt.UserRole) < other.data(Qt.UserRole)
-                        return super(NumericItem, self).__lt__(other)
-
-                if pid in self.processes:
-                    # Meglévő sor frissítése (in-place update, így nem ugrál a kurzor)
-                    row = self.processes[pid]
-
-                    cpu_item = self.table.item(row, 2)
-                    cpu_item.setData(Qt.DisplayRole, f"{cpu:.1f}")
-                    cpu_item.setData(Qt.UserRole, cpu)
-
-                    ram_item = self.table.item(row, 3)
-                    ram_item.setData(Qt.DisplayRole, f"{ram:.1f}")
-                    ram_item.setData(Qt.UserRole, ram)
-                else:
-                    # Új sor beszúrása
-                    row = self.table.rowCount()
-                    self.table.insertRow(row)
-
-                    name_item = QTableWidgetItem(name)
-
-                    pid_item = NumericItem()
-                    pid_item.setData(Qt.DisplayRole, str(pid))
-                    pid_item.setData(Qt.UserRole, int(pid))
-
-                    cpu_item = NumericItem()
-                    cpu_item.setData(Qt.DisplayRole, f"{cpu:.1f}")
-                    cpu_item.setData(Qt.UserRole, float(cpu))
-
-                    ram_item = NumericItem()
-                    ram_item.setData(Qt.DisplayRole, f"{ram:.1f}")
-                    ram_item.setData(Qt.UserRole, float(ram))
-
-                    self.table.setItem(row, 0, name_item)
-                    self.table.setItem(row, 1, pid_item)
-                    self.table.setItem(row, 2, cpu_item)
-                    self.table.setItem(row, 3, ram_item)
-
-                    self.processes[pid] = row
+                new_data.append({'name': name, 'pid': pid, 'cpu': cpu, 'ram': ram})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-        # Halott processzek törlése
-        pids_to_remove = set(self.processes.keys()) - current_pids
-        if pids_to_remove:
-            rows_to_remove = sorted([self.processes[pid] for pid in pids_to_remove], reverse=True)
-            for row in rows_to_remove:
-                self.table.removeRow(row)
+        # Cache takarítás
+        pids_to_remove = set(self.process_cache.keys()) - current_pids
+        for pid in pids_to_remove:
+            del self.process_cache[pid]
 
-            for pid in pids_to_remove:
-                if pid in self.process_cache:
-                    del self.process_cache[pid]
+        # Update Table Model (this triggers the view to update without losing scroll position/sorting)
+        self.table_model.update_data(new_data)
 
-            # Újraépítjük a sor indexeket a törlés után
-            self.processes = {}
-            for row in range(self.table.rowCount()):
-                pid = self.table.item(row, 1).data(Qt.UserRole)
-                self.processes[pid] = row
 
-        if is_sorting:
-            self.table.setSortingEnabled(True)
-
+# Server logikát beépítjük, hogy QSystemTrayIconnal is mukodjön.
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    app.setQuitOnLastWindowClosed(False) # Hogy fusson a tálcán
+
+    # Singleton check
+    socket = QLocalSocket()
+    socket.connectToServer('Jules_HW_Monitor_Instance')
+    if socket.waitForConnected(500):
+        # Már fut!
+        socket.write(b"SHOW")
+        socket.waitForBytesWritten(500)
+        sys.exit(0)
+
+    server = QLocalServer()
+    server.removeServer('Jules_HW_Monitor_Instance')
+    server.listen('Jules_HW_Monitor_Instance')
+
     window = HardwareMonitor()
-    window.show()
+
+    # Ha kap egy SHOW üzenetet a szerver a másik klienstől
+    def on_new_connection():
+        conn = server.nextPendingConnection()
+        conn.waitForReadyRead(500)
+        conn.readAll()
+        window.showNormal()
+        window.activateWindow()
+
+    server.newConnection.connect(on_new_connection)
+
+    if "--hidden" not in sys.argv:
+        window.show()
+
     sys.exit(app.exec_())
