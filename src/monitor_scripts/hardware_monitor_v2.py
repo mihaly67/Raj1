@@ -131,7 +131,7 @@ class HardwareMonitor(QMainWindow):
         self.setStyleSheet("QMainWindow { background-color: #0f172a; color: white; }")
 
         # Ablak ikon (Pajzs)
-        self.icon_path = "/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png"
+        self.icon_path = "/usr/share/icons/breeze-dark/apps/48/utilities-system-monitor.svg"
         if os.path.exists(self.icon_path):
             self.setWindowIcon(QIcon(self.icon_path))
         else:
