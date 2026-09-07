@@ -1,6 +1,7 @@
 import sys
 import psutil
 import subprocess
+import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
                              QHeaderView, QAbstractItemView)
@@ -13,7 +14,7 @@ class ResourceBar(QWidget):
         self.label_text = label_text
         self.val1 = 0.0 # Zöld (User)
         self.val2 = 0.0 # Vörös (System/Kernel)
-        self.setFixedHeight(30)
+        self.setFixedHeight(15) # Magasság felezve (30 -> 15)
 
     def update_values(self, val1, val2=0.0):
         self.val1 = val1
@@ -42,12 +43,49 @@ class ResourceBar(QWidget):
         # Téglavörös (val2)
         painter.fillRect(w1, 0, w2, height, QColor("#dc2626"))
 
-        # Szöveg kiírása
+        # Szöveg kiírása (kisebb font miatt 15px-be férjen)
         painter.setPen(QColor("white"))
-        font = QFont("Segoe UI", 9, QFont.Bold)
+        font = QFont("Segoe UI", 8, QFont.Bold)
         painter.setFont(font)
         text = f"{self.label_text} [{self.val1+self.val2:.1f}%]"
         painter.drawText(self.rect(), Qt.AlignVCenter | Qt.AlignLeft, "  " + text)
+
+
+class MultiBar(QWidget):
+    def __init__(self, label_text, color_map, parent=None):
+        super().__init__(parent)
+        self.label_text = label_text
+        self.color_map = color_map # list of (color_hex, value_percentage)
+        self.setFixedHeight(15)
+        self.text_override = ""
+
+    def update_values(self, color_map, text_override=""):
+        self.color_map = color_map
+        self.text_override = text_override
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        painter.fillRect(self.rect(), QColor("#1e293b"))
+
+        width = self.rect().width()
+        height = self.rect().height()
+
+        current_x = 0
+        for color_hex, val_pct in self.color_map:
+            w = int((val_pct / 100.0) * width)
+            if w > 0:
+                painter.fillRect(current_x, 0, w, height, QColor(color_hex))
+                current_x += w
+
+        painter.setPen(QColor("white"))
+        font = QFont("Segoe UI", 8, QFont.Bold)
+        painter.setFont(font)
+        text = self.text_override if self.text_override else self.label_text
+        painter.drawText(self.rect(), Qt.AlignVCenter | Qt.AlignLeft, "  " + text)
+
 
 class HardwareMonitor(QMainWindow):
     def __init__(self):
@@ -56,9 +94,8 @@ class HardwareMonitor(QMainWindow):
         self.resize(1000, 800)
         self.setStyleSheet("QMainWindow { background-color: #0f172a; color: white; }")
 
-        # Ablak ikon (Tálcára tételhez pajzs ikon)
-        icon_path = "/usr/share/icons/oxygen/base/128x128/status/security-high.png"
-        import os
+        # Ablak ikon (Tálcára tételhez klasszikus system monitor ikon pajzs helyett)
+        icon_path = "/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png"
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         else:
@@ -67,6 +104,11 @@ class HardwareMonitor(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
+
+        # --- Felső statisztikák (Htop stílus) ---
+        self.stats_header = QLabel("Uptime: N/A  |  Load average: N/A  |  Tasks: N/A")
+        self.stats_header.setStyleSheet("color: #cbd5e1; font-weight: bold; font-size: 13px; margin-bottom: 5px;")
+        self.layout.addWidget(self.stats_header)
 
         # --- CPU Szekció ---
         self.cpu_bars = []
@@ -84,7 +126,7 @@ class HardwareMonitor(QMainWindow):
         col1 = QVBoxLayout()
         col2 = QVBoxLayout()
         for i in range(self.cpu_count):
-            bar = ResourceBar(f"CPU Mag {i+1}")
+            bar = ResourceBar(f"{i+1}")
             self.cpu_bars.append(bar)
             if i % 2 == 0:
                 col1.addWidget(bar)
@@ -93,6 +135,20 @@ class HardwareMonitor(QMainWindow):
         cpu_layout.addLayout(col1)
         cpu_layout.addLayout(col2)
         self.layout.addLayout(cpu_layout)
+
+        # --- Memória és Swap ---
+        mem_layout = QVBoxLayout()
+
+        # Jelmagyarázat
+        legend_lbl = QLabel("Jelmagyarázat: [Zöld=Használt] [Kék=Puffer] [Sárga=Cache] | CPU: [Zöld=User] [Vörös=Sys]")
+        legend_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        mem_layout.addWidget(legend_lbl)
+
+        self.mem_bar = MultiBar("Mem", [])
+        self.swap_bar = MultiBar("Swp", [])
+        mem_layout.addWidget(self.mem_bar)
+        mem_layout.addWidget(self.swap_bar)
+        self.layout.addLayout(mem_layout)
 
         # --- GPU Szekció ---
         gpu_header = QLabel("GPU & VRAM (NVIDIA)")
@@ -135,7 +191,37 @@ class HardwareMonitor(QMainWindow):
         # Alapértelmezett rendezés Név alapján (ABC) - mint Win XP
         self.table.sortItems(0, Qt.AscendingOrder)
 
+    def get_uptime(self):
+        try:
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.readline().split()[0])
+            hours, rem = divmod(uptime_seconds, 3600)
+            minutes, _ = divmod(rem, 60)
+            return f"{int(hours):02d}:{int(minutes):02d}:{int(_):02d}"
+        except:
+            return "N/A"
+
+    def get_loadavg(self):
+        try:
+            avg1, avg5, avg15 = os.getloadavg()
+            return f"{avg1:.2f} {avg5:.2f} {avg15:.2f}"
+        except:
+            return "N/A"
+
     def update_stats(self):
+        # 0. Felső Statisztika Frissítés
+        try:
+            tasks_total = len(psutil.pids())
+            # Gyors becslés a running taskokra htop stílusban
+            running = len([p for p in psutil.process_iter(['status']) if p.info.get('status') == psutil.STATUS_RUNNING])
+
+            uptime = self.get_uptime()
+            loadavg = self.get_loadavg()
+
+            self.stats_header.setText(f"Uptime: {uptime}  |  Load average: {loadavg}  |  Tasks: {tasks_total}, {running} running")
+        except:
+            pass
+
         # 1. CPU Frissítés
         total_times = psutil.cpu_times_percent(percpu=False)
         self.total_cpu_bar.update_values(total_times.user, total_times.system)
@@ -144,6 +230,29 @@ class HardwareMonitor(QMainWindow):
         for i, c in enumerate(core_times):
             if i < len(self.cpu_bars):
                 self.cpu_bars[i].update_values(c.user, c.system)
+
+        # 1.5 Memória és SWAP
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+
+        mem_used_pct = (mem.used / mem.total) * 100
+        mem_buff_pct = (getattr(mem, 'buffers', 0) / mem.total) * 100
+        mem_cach_pct = (getattr(mem, 'cached', 0) / mem.total) * 100
+
+        mem_colors = [
+            ("#16a34a", mem_used_pct), # Zöld
+            ("#2563eb", mem_buff_pct), # Kék
+            ("#eab308", mem_cach_pct), # Sárga
+        ]
+        used_gb = mem.used / (1024**3)
+        total_gb = mem.total / (1024**3)
+        self.mem_bar.update_values(mem_colors, f"Mem [{used_gb:.1f}G / {total_gb:.1f}G]")
+
+        swap_used_pct = (swap.used / swap.total) * 100 if swap.total > 0 else 0
+        swap_colors = [("#dc2626", swap_used_pct)] # Piros swap
+        swap_gb = swap.used / (1024**3)
+        swap_tot_gb = swap.total / (1024**3)
+        self.swap_bar.update_values(swap_colors, f"Swp [{swap_gb:.1f}G / {swap_tot_gb:.1f}G]")
 
         # 2. GPU Frissítés
         try:
@@ -218,15 +327,15 @@ class HardwareMonitor(QMainWindow):
 
                     pid_item = NumericItem()
                     pid_item.setData(Qt.DisplayRole, str(pid))
-                    pid_item.setData(Qt.UserRole, pid)
+                    pid_item.setData(Qt.UserRole, int(pid))
 
                     cpu_item = NumericItem()
                     cpu_item.setData(Qt.DisplayRole, f"{cpu:.1f}")
-                    cpu_item.setData(Qt.UserRole, cpu)
+                    cpu_item.setData(Qt.UserRole, float(cpu))
 
                     ram_item = NumericItem()
                     ram_item.setData(Qt.DisplayRole, f"{ram:.1f}")
-                    ram_item.setData(Qt.UserRole, ram)
+                    ram_item.setData(Qt.UserRole, float(ram))
 
                     self.table.setItem(row, 0, name_item)
                     self.table.setItem(row, 1, pid_item)
