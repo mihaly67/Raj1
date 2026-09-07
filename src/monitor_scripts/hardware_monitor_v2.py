@@ -131,7 +131,7 @@ class HardwareMonitor(QMainWindow):
         self.setStyleSheet("QMainWindow { background-color: #0f172a; color: white; }")
 
         # Ablak ikon (Pajzs)
-        self.icon_path = "/usr/share/icons/breeze-dark/apps/48/utilities-system-monitor.svg"
+        self.icon_path = "/usr/share/icons/gnome/256x256/apps/utilities-system-monitor.png"
         if os.path.exists(self.icon_path):
             self.setWindowIcon(QIcon(self.icon_path))
         else:
@@ -392,7 +392,9 @@ if __name__ == '__main__':
 
     server = QLocalServer()
     server.removeServer('Jules_HW_Monitor_Instance')
-    server.listen('Jules_HW_Monitor_Instance')
+    if not server.listen('Jules_HW_Monitor_Instance'):
+        print(f"Failed to listen on socket: {server.errorString()}")
+        sys.exit(1)
 
     window = HardwareMonitor()
 

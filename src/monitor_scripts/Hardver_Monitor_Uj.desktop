@@ -1,10 +1,10 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Rendszer Monitor
+Name=Hardver Monitor (Uj)
 Comment=Htop + Nvtop vizuális összevonás (KDE Stílus)
 Exec=bash -c 'export DISPLAY=:0 && export XAUTHORITY=/home/Jules/.Xauthority && cd /home/Jules/HardverMonitor_dev && python3 hardware_monitor_v2.py'
-Icon=/usr/share/icons/oxygen/base/128x128/apps/utilities-system-monitor.png
+Icon=/usr/share/icons/gnome/256x256/apps/utilities-system-monitor.png
 Terminal=false
 StartupNotify=true
 Categories=System;Monitor;
