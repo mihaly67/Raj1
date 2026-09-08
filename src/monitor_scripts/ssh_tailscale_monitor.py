@@ -22,7 +22,7 @@ class SysMonitor(QMainWindow):
             }
         """)
 
-        icon_path = "/usr/share/icons/oxygen/base/128x128/places/network-workgroup.png"
+        icon_path = "/usr/share/icons/oxygen/base/128x128/places/network-server.png"
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         else:

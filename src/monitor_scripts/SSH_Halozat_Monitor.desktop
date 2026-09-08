@@ -1,10 +1,10 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=SSH & Tailscale Monitor
-Comment=Hálózati kapcsolatok figyelése
+Name=SSH Hálózat Monitor
+Comment=SSH & Tailscale hálózati kapcsolatok figyelése
 Exec=bash -c 'export DISPLAY=:0 && export XAUTHORITY=/home/Jules/.Xauthority && cd /home/Jules/HardverMonitor_dev && /home/Jules/jules_venv/bin/python ssh_tailscale_monitor.py'
-Icon=network-wired
+Icon=/usr/share/icons/oxygen/base/128x128/places/network-server.png
 Terminal=false
 StartupNotify=true
 Categories=Network;Monitor;
