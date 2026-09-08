@@ -4,12 +4,13 @@ import signal
 import sys
 import gc
 import torch
+import subprocess
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 
-# Konfiguráció a saját géphez (AMD FX-6100, 16GB RAM, P2000 5GB vRAM)
+# Konfiguráció a saját géphez
 TARGET_DIR = "/home/Jules/MX_LINUX_RAG"
 DB_PATH = "/home/Jules/MX_LINUX_RAG/mx_linux_hybrid.db"
 FAISS_PATH = "/home/Jules/MX_LINUX_RAG/mx_linux_vector.index"
@@ -17,13 +18,9 @@ REPO_LIST_PATH = "/home/Jules/MX_LINUX_RAG/vectorized_repos.txt"
 EXTENSIONS = {'.py', '.c', '.h', '.cpp', '.sh', '.md', '.rst', '.json', '.yaml', '.txt', '.conf', '.mk', '.dts', '.dtsi'}
 
 CHUNK_SIZE = 1500
-# GPU VRAM limit optimalizálása (P2000 5GB vRAM - biztonságos határ a KDE mellett)
 BATCH_SIZE = 32
-# Rendszer RAM limit optimalizálása (Hány fájl chunkját tartjuk a RAM-ban, mielőtt ürítjük a GPU-ra)
-# Mivel 10GB RAM szabad, de a chunkok stringként memóriát esznek, beállítunk egy biztonságos Flush határt.
 MAX_CHUNKS_IN_RAM = 2000
 
-# Globális flag a biztonságos leállításhoz
 SHUTDOWN_REQUESTED = False
 
 def signal_handler(sig, frame):
@@ -35,6 +32,15 @@ def signal_handler(sig, frame):
         print("\n[!] Már folyamatban van a mentés és leállítás. Türelem...")
 
 signal.signal(signal.SIGINT, signal_handler)
+
+def shutdown_machine():
+    """Leállítja a fizikai gépet a feladat végeztével."""
+    print("\n[!] Vektorizálás befejeződött. A gép leállítása (shutdown) indul...")
+    try:
+        cmd = "echo '1104' | sudo -S shutdown -h now"
+        subprocess.run(cmd, shell=True, check=True)
+    except Exception as e:
+        print(f"Hiba a leállítás során: {e}")
 
 def get_files_and_repos(directory):
     file_list = []
@@ -78,44 +84,30 @@ def init_db(db_path):
     return conn, cursor
 
 def get_processed_files(cursor):
-    """Lekérdezi az adatbázisból a már feldolgozott fájlokat."""
     cursor.execute("SELECT DISTINCT path FROM rag_meta")
     rows = cursor.fetchall()
     return set([row[0] for row in rows])
 
-def save_state(conn, index, faiss_path):
-    """Lementi az adatbázist és a FAISS indexet, és törli a GPU gyorsítótárat a RAM felszabadításáért."""
+def save_state(conn, index, faiss_path, cursor, fully_processed_paths):
+    for p in fully_processed_paths:
+        cursor.execute("INSERT OR IGNORE INTO rag_meta (path) VALUES (?)", (p,))
+
     conn.commit()
     cpu_index_to_save = faiss.index_gpu_to_cpu(index)
     faiss.write_index(cpu_index_to_save, faiss_path)
 
-    # RAM és vRAM (OOM Killer) megelőzés
     gc.collect()
     torch.cuda.empty_cache()
 
     print("\n[*] Állapot biztonságosan elmentve! Később folytathatod ugyanezzel a paranccsal.")
 
-def process_and_flush_batch(model, index, cursor, current_batch_chunks, current_batch_paths):
-    """Vektorizálja és elmenti a memóriában lévő chunkokat, elkerülve a memóriaszivárgást."""
-    while len(current_batch_chunks) >= BATCH_SIZE:
-        if SHUTDOWN_REQUESTED:
-            break
+def process_batch(model, index, cursor, batch_chunks, batch_paths):
+    vectors = model.encode(batch_chunks, convert_to_numpy=True)
+    faiss.normalize_L2(vectors)
+    index.add(vectors)
 
-        batch_texts = current_batch_chunks[:BATCH_SIZE]
-        batch_paths = current_batch_paths[:BATCH_SIZE]
-
-        vectors = model.encode(batch_texts, convert_to_numpy=True)
-        faiss.normalize_L2(vectors)
-        index.add(vectors)
-
-        for p, t in zip(batch_paths, batch_texts):
-            cursor.execute("INSERT INTO rag_docs (path, content) VALUES (?, ?)", (p, t))
-            cursor.execute("INSERT OR IGNORE INTO rag_meta (path) VALUES (?)", (p,))
-
-        current_batch_chunks = current_batch_chunks[BATCH_SIZE:]
-        current_batch_paths = current_batch_paths[BATCH_SIZE:]
-
-    return current_batch_chunks, current_batch_paths
+    for p, t in zip(batch_paths, batch_chunks):
+        cursor.execute("INSERT INTO rag_docs (path, content) VALUES (?, ?)", (p, t))
 
 def main():
     if not os.path.exists(TARGET_DIR):
@@ -138,6 +130,7 @@ def main():
     print(f"[*] Összes fájl: {len(files)} | Már feldolgozva: {len(processed_files)} | Hátralévő: {len(remaining_files)}")
     if len(remaining_files) == 0:
         print("[*] Minden fájl feldolgozva!")
+        shutdown_machine()
         return
 
     print("[*] SentenceTransformer modell betöltése GPU-n (CUDA)...")
@@ -158,51 +151,85 @@ def main():
 
     current_batch_chunks = []
     current_batch_paths = []
+
+    fully_processed_paths = set()
     files_processed_since_save = 0
 
     for filepath in tqdm(remaining_files, desc="Fájlok feldolgozása"):
         if SHUTDOWN_REQUESTED:
+            # Code Review javítás: Megszakítás esetén a memóriában lévő maradék chunkokat Eldobjuk!
+            # Így nem kerülnek be részlegesen az adatbázisba, és nem lesznek duplikálva az újrakezdéskor.
+            current_batch_chunks = []
+            current_batch_paths = []
             break
 
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
         except Exception:
+            fully_processed_paths.add(filepath)
             continue
 
         if not content.strip():
+            fully_processed_paths.add(filepath)
             continue
 
         chunks = chunk_text(content, CHUNK_SIZE)
         current_batch_chunks.extend(chunks)
         current_batch_paths.extend([filepath] * len(chunks))
 
-        # Ha összegyűlt elég adat a RAM-ban (és nem csak a Batch határt értük el), ürítjük a GPU-ra
-        if len(current_batch_chunks) >= MAX_CHUNKS_IN_RAM:
-            current_batch_chunks, current_batch_paths = process_and_flush_batch(
-                model, index, cursor, current_batch_chunks, current_batch_paths
-            )
+        while len(current_batch_chunks) >= BATCH_SIZE:
+            if SHUTDOWN_REQUESTED:
+                break
 
+            batch_texts = current_batch_chunks[:BATCH_SIZE]
+            batch_paths = current_batch_paths[:BATCH_SIZE]
+
+            process_batch(model, index, cursor, batch_texts, batch_paths)
+
+            current_batch_chunks = current_batch_chunks[BATCH_SIZE:]
+            current_batch_paths = current_batch_paths[BATCH_SIZE:]
+
+        if SHUTDOWN_REQUESTED:
+            current_batch_chunks = []
+            current_batch_paths = []
+            break
+
+        fully_processed_paths.add(filepath)
         files_processed_since_save += 1
 
-        if files_processed_since_save >= 1000:
-            # Ha még maradt pár dolog a pufferekben (de nem érte el a MAX_CHUNKS limitet), ürítjük mentés előtt.
-            current_batch_chunks, current_batch_paths = process_and_flush_batch(
-                model, index, cursor, current_batch_chunks, current_batch_paths
-            )
-            save_state(conn, index, FAISS_PATH)
+        if files_processed_since_save >= 1000 or len(current_batch_chunks) >= MAX_CHUNKS_IN_RAM:
+            while len(current_batch_chunks) > 0:
+                chunk_sz = min(BATCH_SIZE, len(current_batch_chunks))
+                batch_texts = current_batch_chunks[:chunk_sz]
+                batch_paths = current_batch_paths[:chunk_sz]
+
+                process_batch(model, index, cursor, batch_texts, batch_paths)
+
+                current_batch_chunks = current_batch_chunks[chunk_sz:]
+                current_batch_paths = current_batch_paths[chunk_sz:]
+
+            save_state(conn, index, FAISS_PATH, cursor, fully_processed_paths)
+            fully_processed_paths.clear()
             files_processed_since_save = 0
 
-    # Maradék feldolgozása
-    if len(current_batch_chunks) > 0:
-        vectors = model.encode(current_batch_chunks, convert_to_numpy=True)
-        faiss.normalize_L2(vectors)
-        index.add(vectors)
-        for p, t in zip(current_batch_paths, current_batch_chunks):
-            cursor.execute("INSERT INTO rag_docs (path, content) VALUES (?, ?)", (p, t))
-            cursor.execute("INSERT OR IGNORE INTO rag_meta (path) VALUES (?)", (p,))
+    # Maradék chunkok (ha nem megszakítással álltunk le)
+    if len(current_batch_chunks) > 0 and not SHUTDOWN_REQUESTED:
+        while len(current_batch_chunks) > 0:
+            chunk_sz = min(BATCH_SIZE, len(current_batch_chunks))
+            batch_texts = current_batch_chunks[:chunk_sz]
+            batch_paths = current_batch_paths[:chunk_sz]
 
-    save_state(conn, index, FAISS_PATH)
+            process_batch(model, index, cursor, batch_texts, batch_paths)
+
+            current_batch_chunks = current_batch_chunks[chunk_sz:]
+            current_batch_paths = current_batch_paths[chunk_sz:]
+
+    save_state(conn, index, FAISS_PATH, cursor, fully_processed_paths)
+
+    # Gép kikapcsolása, ha sikeres volt a futás (Nem megszakítás)
+    if not SHUTDOWN_REQUESTED:
+        shutdown_machine()
 
 if __name__ == "__main__":
     main()

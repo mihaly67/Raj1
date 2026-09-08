@@ -1,18 +1,18 @@
 #!/bin/bash
-set -e
-echo "[*] VENV Létrehozása az MX_LINUX_RAG könyvtárban a saját gépen (Jules)..."
-cd /home/Jules/MX_LINUX_RAG
-python3 -m venv venv
-source venv/bin/activate
 
-echo "[*] Függőségek telepítése (faiss-gpu, sentence-transformers, tqdm) CUDA támogatással..."
+# A felhasználó kérésére NEM hozunk létre új 5GB-os venv-et, hanem a már meglévő
+# központi 8GB-os környezetet aktiváljuk a fizikai gépen.
+VENV_PATH="/home/Jules/jules_venv"
+
+echo "[*] Központi VENV aktiválása ($VENV_PATH)..."
+source "$VENV_PATH/bin/activate"
+
+echo "[*] Függőségek ellenőrzése és telepítése a központi venv-be..."
 pip install --upgrade pip
-# Kifejezetten a CUDA-s PyTorch-ot telepítjük
-pip install sentence-transformers tqdm
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-# faiss-gpu telepítése a hardveres gyorsításhoz
-pip install faiss-gpu
+
+# Telepítjük a hiányzó CUDA-s RAG csomagokat
+pip install --no-cache-dir sentence-transformers tqdm faiss-gpu
 
 echo "[*] Függőségek telepítve CUDA támogatással! A RAG építő szkript futtatásához indítsd el:"
-echo "source /home/Jules/MX_LINUX_RAG/venv/bin/activate"
-echo "python3 /home/Jules/build_rag_cuda.py"
+echo "source $VENV_PATH/bin/activate"
+echo "python3 /home/Jules/MX_LINUX_RAG/build_rag_cuda.py"
