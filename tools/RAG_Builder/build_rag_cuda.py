@@ -2,19 +2,26 @@ import os
 import sqlite3
 import signal
 import sys
+import gc
+import torch
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 
-# Konfiguráció a saját géphez
+# Konfiguráció a saját géphez (AMD FX-6100, 16GB RAM, P2000 5GB vRAM)
 TARGET_DIR = "/home/Jules/MX_LINUX_RAG"
 DB_PATH = "/home/Jules/MX_LINUX_RAG/mx_linux_hybrid.db"
 FAISS_PATH = "/home/Jules/MX_LINUX_RAG/mx_linux_vector.index"
 REPO_LIST_PATH = "/home/Jules/MX_LINUX_RAG/vectorized_repos.txt"
 EXTENSIONS = {'.py', '.c', '.h', '.cpp', '.sh', '.md', '.rst', '.json', '.yaml', '.txt', '.conf', '.mk', '.dts', '.dtsi'}
+
 CHUNK_SIZE = 1500
-BATCH_SIZE = 64
+# GPU VRAM limit optimalizálása (P2000 5GB vRAM - biztonságos határ a KDE mellett)
+BATCH_SIZE = 32
+# Rendszer RAM limit optimalizálása (Hány fájl chunkját tartjuk a RAM-ban, mielőtt ürítjük a GPU-ra)
+# Mivel 10GB RAM szabad, de a chunkok stringként memóriát esznek, beállítunk egy biztonságos Flush határt.
+MAX_CHUNKS_IN_RAM = 2000
 
 # Globális flag a biztonságos leállításhoz
 SHUTDOWN_REQUESTED = False
@@ -64,7 +71,7 @@ def init_db(db_path):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rag_meta (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT
+            path TEXT UNIQUE
         )
     ''')
     conn.commit()
@@ -77,11 +84,38 @@ def get_processed_files(cursor):
     return set([row[0] for row in rows])
 
 def save_state(conn, index, faiss_path):
-    """Lementi az adatbázist és a FAISS indexet."""
+    """Lementi az adatbázist és a FAISS indexet, és törli a GPU gyorsítótárat a RAM felszabadításáért."""
     conn.commit()
     cpu_index_to_save = faiss.index_gpu_to_cpu(index)
     faiss.write_index(cpu_index_to_save, faiss_path)
+
+    # RAM és vRAM (OOM Killer) megelőzés
+    gc.collect()
+    torch.cuda.empty_cache()
+
     print("\n[*] Állapot biztonságosan elmentve! Később folytathatod ugyanezzel a paranccsal.")
+
+def process_and_flush_batch(model, index, cursor, current_batch_chunks, current_batch_paths):
+    """Vektorizálja és elmenti a memóriában lévő chunkokat, elkerülve a memóriaszivárgást."""
+    while len(current_batch_chunks) >= BATCH_SIZE:
+        if SHUTDOWN_REQUESTED:
+            break
+
+        batch_texts = current_batch_chunks[:BATCH_SIZE]
+        batch_paths = current_batch_paths[:BATCH_SIZE]
+
+        vectors = model.encode(batch_texts, convert_to_numpy=True)
+        faiss.normalize_L2(vectors)
+        index.add(vectors)
+
+        for p, t in zip(batch_paths, batch_texts):
+            cursor.execute("INSERT INTO rag_docs (path, content) VALUES (?, ?)", (p, t))
+            cursor.execute("INSERT OR IGNORE INTO rag_meta (path) VALUES (?)", (p,))
+
+        current_batch_chunks = current_batch_chunks[BATCH_SIZE:]
+        current_batch_paths = current_batch_paths[BATCH_SIZE:]
+
+    return current_batch_chunks, current_batch_paths
 
 def main():
     if not os.path.exists(TARGET_DIR):
@@ -143,27 +177,23 @@ def main():
         current_batch_chunks.extend(chunks)
         current_batch_paths.extend([filepath] * len(chunks))
 
-        while len(current_batch_chunks) >= BATCH_SIZE:
-            batch_texts = current_batch_chunks[:BATCH_SIZE]
-            batch_paths = current_batch_paths[:BATCH_SIZE]
-
-            vectors = model.encode(batch_texts, convert_to_numpy=True)
-            faiss.normalize_L2(vectors)
-            index.add(vectors)
-
-            for p, t in zip(batch_paths, batch_texts):
-                cursor.execute("INSERT INTO rag_docs (path, content) VALUES (?, ?)", (p, t))
-                cursor.execute("INSERT OR IGNORE INTO rag_meta (path) VALUES (?)", (p,))
-
-            current_batch_chunks = current_batch_chunks[BATCH_SIZE:]
-            current_batch_paths = current_batch_paths[BATCH_SIZE:]
+        # Ha összegyűlt elég adat a RAM-ban (és nem csak a Batch határt értük el), ürítjük a GPU-ra
+        if len(current_batch_chunks) >= MAX_CHUNKS_IN_RAM:
+            current_batch_chunks, current_batch_paths = process_and_flush_batch(
+                model, index, cursor, current_batch_chunks, current_batch_paths
+            )
 
         files_processed_since_save += 1
 
         if files_processed_since_save >= 1000:
+            # Ha még maradt pár dolog a pufferekben (de nem érte el a MAX_CHUNKS limitet), ürítjük mentés előtt.
+            current_batch_chunks, current_batch_paths = process_and_flush_batch(
+                model, index, cursor, current_batch_chunks, current_batch_paths
+            )
             save_state(conn, index, FAISS_PATH)
             files_processed_since_save = 0
 
+    # Maradék feldolgozása
     if len(current_batch_chunks) > 0:
         vectors = model.encode(current_batch_chunks, convert_to_numpy=True)
         faiss.normalize_L2(vectors)
