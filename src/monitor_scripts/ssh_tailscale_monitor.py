@@ -1,40 +1,76 @@
 import sys
 import subprocess
 import re
+import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
-                             QLabel, QTextEdit, QSystemTrayIcon, QMenu, QAction, QStyle)
+                             QLabel, QTextEdit, QSystemTrayIcon, QMenu, QAction, QFrame)
 from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QFont, QIcon, QColor
 
 class SysMonitor(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Jules SSH & Tailscale Monitor")
-        self.resize(700, 550)
+        self.resize(750, 600)
+        self.setStyleSheet("""
+            QMainWindow { background-color: #0f172a; }
+            QLabel { color: white; }
+            QFrame#card {
+                background-color: #1e293b;
+                border-radius: 8px;
+                border: 1px solid #334155;
+            }
+        """)
+
+        icon_path = "/usr/share/icons/oxygen/base/128x128/places/network-workgroup.png"
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            self.setWindowIcon(QIcon.fromTheme("network-wired"))
 
         # Main Widget and Layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
 
         # Title Label
-        self.title_label = QLabel("<b>Jules Box Rendszer Állapot (MX Linux / SysVinit)</b>")
-        self.title_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.title_label)
+        title_label = QLabel("Hálózati Monitor (SSH & Tailscale)")
+        title_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        layout.addWidget(title_label)
 
         # Text Area for Status
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(15, 15, 15, 15)
+
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        # Text is white per user request
-        self.status_text.setStyleSheet("background-color: #1e1e1e; color: #ffffff; font-family: monospace; font-size: 13px;")
-        layout.addWidget(self.status_text)
+        # Modern sötét terminál stílus a belső szövegdoboznak
+        self.status_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #0b0f19;
+                color: #e2e8f0;
+                font-family: monospace;
+                font-size: 13px;
+                border: none;
+            }
+        """)
+        card_layout.addWidget(self.status_text)
+        layout.addWidget(card)
 
         # Setup System Tray
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        if os.path.exists(icon_path):
+            self.tray_icon.setIcon(QIcon(icon_path))
+        else:
+            self.tray_icon.setIcon(QIcon.fromTheme("network-wired"))
 
-        show_action = QAction("Show", self)
-        quit_action = QAction("Exit", self)
-        hide_action = QAction("Hide", self)
+        show_action = QAction("Megjelenítés", self)
+        hide_action = QAction("Elrejtés", self)
+        quit_action = QAction("Bezárás", self)
 
         show_action.triggered.connect(self.showNormal)
         hide_action.triggered.connect(self.hide)
@@ -46,6 +82,7 @@ class SysMonitor(QMainWindow):
         tray_menu.addAction(quit_action)
 
         self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.tray_icon_clicked)
         self.tray_icon.show()
 
         # Update Timer - 5 seconds
@@ -55,6 +92,14 @@ class SysMonitor(QMainWindow):
 
         # Initial Update
         self.update_status()
+
+    def tray_icon_clicked(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.showNormal()
+                self.activateWindow()
 
     def run_cmd(self, cmd):
         try:
@@ -71,10 +116,7 @@ class SysMonitor(QMainWindow):
             if not line or line.startswith("#"):
                 continue
 
-            # Remove redundant user emails and OS info to clean up parsing
             line = re.sub(r'deszkmihaly67@\s+linux\s+', '', line)
-
-            # Now parts should be roughly: IP, NAME, STATUS
             parts = re.split(r'\s{2,}', line)
 
             if len(parts) >= 2:
@@ -83,41 +125,53 @@ class SysMonitor(QMainWindow):
                 status_raw = parts[2] if len(parts) > 2 else "-"
                 status_raw_lower = status_raw.lower()
 
-                # Make status human readable
+                # HTML styling based on status
                 if name.lower() == "jules":
-                    status = "[Helyi gép / ONLINE]"
+                    status = "<span style='color:#3b82f6;'>[Helyi gép / ONLINE]</span>"
                 elif "active" in status_raw_lower:
-                    status = "[ONLINE / AKTÍV]"
+                    status = "<span style='color:#22c55e;'>[ONLINE / AKTÍV]</span>"
                 elif "idle" in status_raw_lower:
-                    status = "[ONLINE / IDLE]"
+                    status = "<span style='color:#10b981;'>[ONLINE / IDLE]</span>"
                 elif "offline" in status_raw_lower:
-                    status = "[OFFLINE]"
+                    status = "<span style='color:#ef4444;'>[OFFLINE]</span>"
                 else:
-                    status = "[ONLINE / STANDBY]" # Ha csak '-' van, az azt jelenti a tailscale-nél, hogy jelen van, de nincs forgalom
+                    status = "<span style='color:#eab308;'>[ONLINE / STANDBY]</span>"
 
                 parsed_lines.append(f"{ip:<15} {name:<12} {status}")
             else:
                 parsed_lines.append(line)
 
         if not parsed_lines:
-            return "Nincs adat a hálózatról."
+            return "<span style='color:#94a3b8;'>Nincs adat a hálózatról.</span>"
 
-        return "\n".join(parsed_lines)
+        return "<br>".join(parsed_lines)
 
     def update_status(self):
-        output = "=== SSH SZOLGÁLTATÁS ÁLLAPOTA ===\n"
+        output = "<h3 style='color:#64748b; margin-bottom:5px;'>=== SSH SZOLGÁLTATÁS ÁLLAPOTA ===</h3>"
         ssh_status = self.run_cmd("/etc/init.d/ssh status")
-        output += f"{ssh_status}\n\n"
 
-        output += "=== NYITOTT PORTOK (Tűzfal / Listen) ===\n"
+        # Colorize SSH output
+        if "is running" in ssh_status or "active (running)" in ssh_status:
+            ssh_status = f"<span style='color:#22c55e;'>{ssh_status}</span>"
+        else:
+            ssh_status = f"<span style='color:#ef4444;'>{ssh_status}</span>"
+
+        output += f"{ssh_status}<br><br>"
+
+        output += "<h3 style='color:#64748b; margin-bottom:5px;'>=== NYITOTT PORTOK (Tűzfal / Listen) ===</h3>"
         ports = self.run_cmd("ss -ltn | grep -E ':22 |:8000 |:8765 |:5555 |:5556 |:5557 '")
-        output += f"{ports}\n\n"
+        if ports:
+            # Highlight ports logically
+            ports = ports.replace("\n", "<br>")
+            output += f"<span style='color:#cbd5e1;'>{ports}</span><br><br>"
+        else:
+            output += "<span style='color:#94a3b8;'>Nincsenek figyelt portok.</span><br><br>"
 
-        output += "=== TAILSCALE HÁLÓZAT (Devboxok) ===\n"
+        output += "<h3 style='color:#64748b; margin-bottom:5px;'>=== TAILSCALE HÁLÓZAT (Devboxok) ===</h3>"
         ts_status = self.run_cmd("tailscale status")
-        output += f"{self.parse_tailscale(ts_status)}\n"
+        output += f"{self.parse_tailscale(ts_status)}<br>"
 
-        self.status_text.setText(output)
+        self.status_text.setHtml(output)
 
     def closeEvent(self, event):
         event.ignore()
@@ -129,11 +183,11 @@ class SysMonitor(QMainWindow):
             2000
         )
 
-
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     app.setQuitOnLastWindowClosed(False)
 
     socket = QLocalSocket()
