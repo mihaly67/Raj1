@@ -49,25 +49,12 @@ class Dashboard(QMainWindow):
         # Tray Icon beállítása (KDE Plasma stílushoz illeszkedő, ahogy a korábbi kódokban volt)
         self.tray_icon = QSystemTrayIcon(self)
 
-        # A biztonsági pajzs ikon betöltése (security-high) a Qt natív témakészletéből,
-        # vagy egy explicit KDE/MX Linux elérési útról.
-        icon = QIcon.fromTheme("security-high")
-        if icon.isNull():
-            icon_path = "/usr/share/icons/oxygen/base/128x128/apps/security-high.png"
-            if not os.path.exists(icon_path):
-                icon_path = "/usr/share/icons/gnome/256x256/apps/security-high.png"
-
-            if os.path.exists(icon_path):
-                icon = QIcon(icon_path)
-            else:
-                # Fallback icon
-                pixmap = QPixmap(64, 64)
-                pixmap.fill(Qt.transparent)
-                painter = QPainter(pixmap)
-                painter.setBrush(QColor("#3b82f6"))
-                painter.drawEllipse(0, 0, 64, 64)
-                painter.end()
-                icon = QIcon(pixmap)
+        # A biztonsági pajzs ikon betöltése abszolút elérési útról (MX Linux Oxygen téma)
+        icon_path = "/usr/share/icons/oxygen/base/128x128/status/security-high.png"
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+        else:
+            icon = QIcon.fromTheme("security-high")
 
         self.tray_icon.setIcon(icon)
 
@@ -95,6 +82,16 @@ class Dashboard(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle("CyberSec Control Center")
+
+        # Set Window Icon (shows on KDE taskbar when minimized)
+        icon_path = "/usr/share/icons/oxygen/base/128x128/status/security-high.png"
+        import os
+        from PyQt5.QtGui import QIcon
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            self.setWindowIcon(QIcon.fromTheme("security-high"))
+
         self.resize(700, 450)
 
         self.setStyleSheet("""
@@ -216,12 +213,17 @@ class Dashboard(QMainWindow):
 
         # Buttons row 2: Updating
         scan_btns2 = QHBoxLayout()
-        btn_update_manual = QPushButton("Manual Update")
+        btn_update_manual = QPushButton("Update Signatures")
         self.btn_update_auto = QPushButton("Auto Update (Cron): OFF")
+        btn_upgrade_engine = QPushButton("Upgrade ClamAV Engine")
+
         btn_update_manual.clicked.connect(self.start_manual_update)
         self.btn_update_auto.clicked.connect(self.toggle_auto_update)
+        btn_upgrade_engine.clicked.connect(self.start_engine_upgrade)
+
         scan_btns2.addWidget(btn_update_manual)
         scan_btns2.addWidget(self.btn_update_auto)
+        scan_btns2.addWidget(btn_upgrade_engine)
 
         scan_layout.addWidget(scan_header)
         scan_layout.addLayout(scan_btns1)
@@ -365,8 +367,19 @@ class Dashboard(QMainWindow):
             return
 
         self.clam_log.clear()
-        self.clam_log.append(f"[*] Starting ClamAV Scan on: {target_dir}")
-        self.execute_sudo_cmd(self.clam_scan_proc, ["clamscan", "-r", "-i", target_dir])
+        self.clam_log.append(f"[*] Starting Advanced ClamAV Scan on: {target_dir}")
+        self.clam_log.append("[*] (Includes emails, archives, macros, html, pua, phishing)")
+
+        # Extended ClamAV flags for maximum detection
+        clam_args = [
+            "clamscan", "-r", "-i",
+            "--phishing-sigs=yes", "--phishing-scan-urls=yes",
+            "--detect-pua=yes", "--scan-mail=yes",
+            "--scan-archive=yes", "--scan-ole2=yes",
+            "--scan-pe=yes", "--scan-html=yes",
+            target_dir
+        ]
+        self.execute_sudo_cmd(self.clam_scan_proc, clam_args)
 
     def start_custom_scan(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory to Scan")
@@ -395,6 +408,17 @@ class Dashboard(QMainWindow):
         self.clam_log.append("[*] Starting manual signature update (freshclam)...")
         self.execute_sudo_cmd(self.clam_update_proc, ["freshclam"])
 
+    def start_engine_upgrade(self):
+        if self.clam_update_proc.state() == QProcess.Running:
+            self.clam_log.append("⚠️ An update/upgrade process is already running!")
+            return
+
+        self.clam_log.clear()
+        self.clam_log.append("[*] Starting ClamAV Engine Upgrade via APT...")
+        # Force apt-get to upgrade clamav packages non-interactively
+        cmd = "apt-get update && apt-get install --only-upgrade -y clamav clamav-daemon clamav-freshclam"
+        self.execute_sudo_cmd(self.clam_update_proc, ["bash", "-c", cmd])
+
     def clam_update_output(self):
         text = self.clam_update_proc.readAllStandardOutput().data().decode(errors='ignore')
         self.clam_log.append(text.strip())
@@ -408,9 +432,11 @@ class Dashboard(QMainWindow):
         if "ON" in self.btn_update_auto.text():
             cmd = "sudo crontab -l 2>/dev/null | grep -v update_clamav.sh | sudo crontab -"
             self.clam_log.append("[*] Disabling automatic updates...")
+            self.btn_update_auto.setText("Auto Update (Cron): OFF")
         else:
             cmd = "(sudo crontab -l 2>/dev/null | grep -v update_clamav.sh; echo '0 */4 * * * /usr/local/bin/update_clamav.sh') | sudo crontab -"
             self.clam_log.append("[*] Enabling automatic updates (every 4 hours)...")
+            self.btn_update_auto.setText("Auto Update (Cron): ON")
 
         self.clam_cron_proc.start("bash", ["-c", cmd])
         # Force a status update check slightly after
