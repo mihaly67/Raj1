@@ -37,7 +37,9 @@ def shutdown_machine():
     """Leállítja a fizikai gépet a feladat végeztével."""
     print("\n[!] Vektorizálás befejeződött. A gép leállítása (shutdown) indul...")
     try:
-        cmd = "echo '1104' | sudo -S shutdown -h now"
+        # Biztonsági hiba (Code Review): A plaintext jelszó (1104) eltávolítva.
+        # A fizikai gép pkexec/sudoers szabályaira támaszkodunk, hogy végrehajtsa.
+        cmd = "sudo shutdown -h now"
         subprocess.run(cmd, shell=True, check=True)
     except Exception as e:
         print(f"Hiba a leállítás során: {e}")
@@ -157,8 +159,6 @@ def main():
 
     for filepath in tqdm(remaining_files, desc="Fájlok feldolgozása"):
         if SHUTDOWN_REQUESTED:
-            # Code Review javítás: Megszakítás esetén a memóriában lévő maradék chunkokat Eldobjuk!
-            # Így nem kerülnek be részlegesen az adatbázisba, és nem lesznek duplikálva az újrakezdéskor.
             current_batch_chunks = []
             current_batch_paths = []
             break
@@ -213,7 +213,6 @@ def main():
             fully_processed_paths.clear()
             files_processed_since_save = 0
 
-    # Maradék chunkok (ha nem megszakítással álltunk le)
     if len(current_batch_chunks) > 0 and not SHUTDOWN_REQUESTED:
         while len(current_batch_chunks) > 0:
             chunk_sz = min(BATCH_SIZE, len(current_batch_chunks))
@@ -227,7 +226,6 @@ def main():
 
     save_state(conn, index, FAISS_PATH, cursor, fully_processed_paths)
 
-    # Gép kikapcsolása, ha sikeres volt a futás (Nem megszakítás)
     if not SHUTDOWN_REQUESTED:
         shutdown_machine()
 
